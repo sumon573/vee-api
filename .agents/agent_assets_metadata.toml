@@ -12,3 +12,15 @@ id = "95G7eEx5hd1D9AifU-ftN"
 uri = "file://vee-production-final.zip"
 type = "unspecified"
 title = "vee-production-final.zip — Final Verified Production Release"
+
+[[outputs]]
+id = "k1yG6y_oSnuKLsiZrirxl"
+uri = "file://vee-app-final.zip"
+type = "unspecified"
+title = "vee-app-final.zip — Expo App (React Native)"
+
+[[outputs]]
+id = "UDZSfGr5QJP79geToD698"
+uri = "file://vee-backend-final.zip"
+type = "unspecified"
+title = "vee-backend-final.zip — API Server (Express + Firebase Admin)"
