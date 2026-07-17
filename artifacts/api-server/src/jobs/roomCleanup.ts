@@ -1,135 +1,146 @@
 /**
  * Room Session Cleanup Job
  *
- * When the last user leaves a voice room, the room should NOT be deleted.
- * Instead, only session data is cleared after a 30–60s grace period.
+ * When the last user leaves a voice room the room is NOT deleted.
+ * Only session data is cleared after a 30–60 s grace period so that a
+ * quick rejoin prevents the wipe.
  *
- * What is cleared (session reset):
- *   ✓ rooms/{roomId}/chat
- *   ✓ rooms/{roomId}/seats
- *   ✓ rooms/{roomId}/audience
- *   ✓ rooms/{roomId}/reactions
- *   ✓ rooms/{roomId}/lockedSeats
- *   ✓ rooms/{roomId}/seatRequests
- *   ✓ roomBlocks/{roomId}
- *   ✓ rooms/{roomId}/info.{active, isLive} → set to false/false
+ * Cleared on session reset (room keeps its metadata):
+ *   rooms/{roomId}/chat           – message history
+ *   rooms/{roomId}/seats          – speaker seats
+ *   rooms/{roomId}/audience       – audience presence
+ *   rooms/{roomId}/reactions      – emoji bursts
+ *   rooms/{roomId}/lockedSeats    – seat locks
+ *   rooms/{roomId}/seatRequests   – pending requests
+ *   roomBlocks/{roomId}           – per-session blocks
+ *   rooms/{roomId}/info.*         – active/isLive → false, counters reset
  *
- * What is preserved (room metadata):
- *   ✓ rooms/{roomId}/info.id
- *   ✓ rooms/{roomId}/info.name
- *   ✓ rooms/{roomId}/info.ownerId
- *   ✓ rooms/{roomId}/info.isPublic
- *   ✓ rooms/{roomId}/info.category
- *   ✓ rooms/{roomId}/info.themeColor
- *   ✓ rooms/{roomId}/info.coverImageUrl
- *   ✓ rooms/{roomId}/info.createdAt
- *   ✓ roomPins/{roomId}  (PIN is preserved for future sessions)
+ * Preserved (room metadata never touched):
+ *   rooms/{roomId}/info.id / name / ownerId / isPublic / category /
+ *       themeColor / coverImageUrl / createdAt / description / topic
+ *   roomPins/{roomId}             – PIN kept for future sessions
  *
- * Design:
- *   ✓ Idempotent: running twice on the same empty room has no extra effect.
- *   ✓ Crash-safe: each cleanup step uses separate Firebase writes; a crash
- *       mid-cleanup leaves the room in an "already partially reset" state
- *       that's safe to retry.
- *   ✓ Race-condition-safe: the grace period + recheck pattern ensures that a
- *       quick rejoin between the last-leave and the cleanup prevents the reset.
- *   ✓ Memory-leak-free: all timers are tracked in a Map and cancelled on
- *       unsub or when a new user joins before the grace period ends.
+ * Design guarantees:
+ *   Idempotent  — running twice on the same empty room is side-effect-free.
+ *   Crash-safe  — each step is an independent Firebase write; a mid-cleanup
+ *                 crash leaves the room in a "partially reset" state that the
+ *                 next run can safely retry.
+ *   Race-safe   — grace-period + recheck prevents a wipe when a user rejoins
+ *                 between the last-leave event and the timer firing.
+ *
+ * Environment variables (must match Render / production backend):
+ *   FIREBASE_SERVICE_ACCOUNT  – JSON string of the Firebase Admin service
+ *                               account credentials (same name used everywhere
+ *                               in the production backend).
+ *   FIREBASE_DATABASE_URL     – Optional. Realtime Database URL. Falls back to
+ *                               the hardcoded production URL if not set.
  */
 
 import { logger } from "../lib/logger.js";
 
-// ─── Firebase Admin SDK ────────────────────────────────────────────────────────
+// ─── Constants ─────────────────────────────────────────────────────────────────
 
-// Firebase Admin is initialized lazily so the server starts even when env
-// vars aren't set (dev/test mode). Cleanup simply doesn't run in that case.
+const GRACE_PERIOD_MS = 45_000; // 45 s — must be 30–60 s per spec
 
-type AdminDatabase = {
-  ref(path?: string): AdminRef;
-};
+/**
+ * Hardcoded fallback so the job works even if FIREBASE_DATABASE_URL is not
+ * explicitly set on the host (the URL is public, non-sensitive info).
+ */
+const FALLBACK_DATABASE_URL =
+  "https://vee-chat-36720-default-rtdb.asia-southeast1.firebasedatabase.app";
 
-type AdminRef = {
-  on(event: string, cb: (snap: AdminSnap) => void): void;
-  off(): void;
-  once(event: string): Promise<AdminSnap>;
-  remove(): Promise<void>;
-  update(data: Record<string, unknown>): Promise<void>;
-};
+// ─── Firebase Admin — lazy ESM initialisation ──────────────────────────────────
 
-type AdminSnap = {
-  exists(): boolean;
-  val(): unknown;
-  forEach(cb: (child: AdminSnap) => boolean | void): void;
-  key: string | null;
-};
+// We use a top-level `let` + lazy init so:
+//   a) The server starts without crashing when env vars are absent (dev/test).
+//   b) ESM dynamic import() is used — compatible with `"type": "module"` and
+//      with the esbuild bundle that externalises firebase-admin.
 
-let _db: AdminDatabase | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let adminDb: any = null;
+let adminInitAttempted = false;
 
-function getDb(): AdminDatabase | null {
-  if (_db) return _db;
+async function getDb() {
+  if (adminDb) return adminDb;
+  if (adminInitAttempted) return null; // already failed — don't retry
+  adminInitAttempted = true;
 
-  const serviceAccountJson = process.env["FIREBASE_SERVICE_ACCOUNT_JSON"];
-  const databaseUrl = process.env["FIREBASE_DATABASE_URL"];
+  const serviceAccountRaw = process.env["FIREBASE_SERVICE_ACCOUNT"];
+  const databaseURL =
+    process.env["FIREBASE_DATABASE_URL"] ?? FALLBACK_DATABASE_URL;
 
-  if (!serviceAccountJson || !databaseUrl) {
+  if (!serviceAccountRaw) {
     logger.warn(
-      "FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_DATABASE_URL not set — room cleanup job disabled",
+      "FIREBASE_SERVICE_ACCOUNT env var not set — room cleanup job disabled",
     );
     return null;
   }
 
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const admin = require("firebase-admin");
-    if (!admin.apps.length) {
-      const serviceAccount = JSON.parse(serviceAccountJson);
-      admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-        databaseURL: databaseUrl,
+    const serviceAccount = JSON.parse(serviceAccountRaw);
+    // Dynamic ESM import — firebase-admin is externalised by esbuild so Node
+    // resolves it from node_modules at runtime.
+    // firebase-admin is externalised by esbuild — resolved from node_modules
+    // at runtime. Cast to `any` because the ESM dynamic-import type wrapper
+    // differs from the CJS type declarations; runtime shape is identical.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adminPkg = (await import("firebase-admin")) as any;
+    // firebase-admin v14 ships both a default export and named re-exports;
+    // prefer `.default` (ESM), fall back to the module itself (CJS compat).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adminModule = (adminPkg.default ?? adminPkg) as any;
+
+    if (!adminModule.apps.length) {
+      adminModule.initializeApp({
+        credential: adminModule.credential.cert(serviceAccount),
+        databaseURL,
       });
     }
-    _db = admin.database() as AdminDatabase;
-    return _db;
+    adminDb = adminModule.database();
+    logger.info({ databaseURL }, "Firebase Admin initialised for room cleanup");
+    return adminDb;
   } catch (err) {
-    logger.error({ err }, "Failed to initialize Firebase Admin — room cleanup disabled");
+    logger.error(
+      { err },
+      "Failed to initialise Firebase Admin — room cleanup disabled",
+    );
     return null;
   }
 }
 
-// ─── Grace-period tracker ─────────────────────────────────────────────────────
+// ─── Grace-period tracker ──────────────────────────────────────────────────────
 
-/** roomId → NodeJS.Timeout for the scheduled cleanup */
+/** roomId → pending cleanup timer */
 const pendingCleanups = new Map<string, ReturnType<typeof setTimeout>>();
 
-const GRACE_PERIOD_MS = 45_000; // 45 seconds
-
-// ─── Cleanup Logic ────────────────────────────────────────────────────────────
+// ─── Core cleanup ──────────────────────────────────────────────────────────────
 
 /**
- * Clear a room's session data without deleting the room itself.
- * Idempotent: safe to call multiple times.
+ * Clear session data for a room without touching its metadata.
+ * Idempotent and safe to call multiple times.
  */
 async function resetRoomSession(roomId: string): Promise<void> {
-  const db = getDb();
+  const db = await getDb();
   if (!db) return;
 
-  logger.info({ roomId }, "Resetting room session (last user has left)");
+  logger.info({ roomId }, "Resetting room session (last user left)");
 
   try {
     const infoRef = db.ref(`rooms/${roomId}/info`);
     const infoSnap = await infoRef.once("value");
+
     if (!infoSnap.exists()) {
-      logger.info({ roomId }, "Room info not found — skipping reset");
+      logger.info({ roomId }, "Room info missing — skipping reset");
       return;
     }
 
     const info = infoSnap.val() as Record<string, unknown>;
-    if (!info.active) {
-      // Already deactivated — nothing to do
-      logger.info({ roomId }, "Room already inactive — skipping reset");
+    if (!info["active"]) {
+      logger.info({ roomId }, "Room already inactive — reset skipped");
       return;
     }
 
-    // Update room info: mark as inactive without deleting it
+    // Mark room as inactive (preserves all metadata fields)
     await infoRef.update({
       active: false,
       isLive: false,
@@ -140,7 +151,8 @@ async function resetRoomSession(roomId: string): Promise<void> {
       closedAt: Date.now(),
     });
 
-    // Clear all session data in parallel (each remove is idempotent)
+    // Purge session collections — allSettled so a single failure doesn't
+    // abort the rest (idempotent on next run)
     await Promise.allSettled([
       db.ref(`rooms/${roomId}/chat`).remove(),
       db.ref(`rooms/${roomId}/seats`).remove(),
@@ -153,169 +165,170 @@ async function resetRoomSession(roomId: string): Promise<void> {
 
     logger.info({ roomId }, "Room session reset complete");
   } catch (err) {
-    logger.error({ err, roomId }, "Room session reset failed — will retry on next poll");
+    logger.error({ err, roomId }, "Room session reset failed — will retry next cycle");
   }
 }
 
 /**
- * Check whether a room is truly empty (no seats, no audience).
- * Used after the grace period to confirm the room is still empty.
+ * Returns true when both seats and audience for the room are empty.
  */
 async function isRoomEmpty(roomId: string): Promise<boolean> {
-  const db = getDb();
+  const db = await getDb();
   if (!db) return false;
   try {
-    const [seatsSnap, audSnap] = await Promise.all([
+    const [seats, audience] = await Promise.all([
       db.ref(`rooms/${roomId}/seats`).once("value"),
       db.ref(`rooms/${roomId}/audience`).once("value"),
     ]);
-    return !seatsSnap.exists() && !audSnap.exists();
+    return !seats.exists() && !audience.exists();
   } catch {
     return false;
   }
 }
 
-/**
- * Schedule a session reset for a room after the grace period.
- * If a new user joins before the timer fires, the pending cleanup is cancelled.
- */
-function scheduleRoomCleanup(roomId: string): void {
-  // Cancel any existing pending cleanup for this room
+// ─── Grace-period scheduler ────────────────────────────────────────────────────
+
+function scheduleCleanup(roomId: string): void {
+  // Cancel any earlier pending cleanup for this room
   const existing = pendingCleanups.get(roomId);
   if (existing) clearTimeout(existing);
 
   const timer = setTimeout(async () => {
     pendingCleanups.delete(roomId);
-    // Grace period elapsed — recheck before cleaning
+    // Recheck after grace period — a rejoin cancels the cleanup
     const empty = await isRoomEmpty(roomId);
     if (empty) {
       await resetRoomSession(roomId);
     } else {
-      logger.info({ roomId }, "Room no longer empty after grace period — cleanup cancelled");
+      logger.info({ roomId }, "Room not empty after grace period — cleanup cancelled (user rejoined)");
     }
   }, GRACE_PERIOD_MS);
 
   pendingCleanups.set(roomId, timer);
-  logger.info({ roomId, graceMs: GRACE_PERIOD_MS }, "Room cleanup scheduled after grace period");
+  logger.info({ roomId, graceMs: GRACE_PERIOD_MS }, "Room cleanup scheduled");
 }
 
-// ─── Active Room Watcher ──────────────────────────────────────────────────────
+// ─── Per-room watcher ──────────────────────────────────────────────────────────
 
-/** Set of room IDs currently being watched for emptiness. */
 const watchedRooms = new Set<string>();
-/** Map of roomId → listener unsub functions */
-const roomListeners = new Map<string, () => void>();
+const roomUnsubFns = new Map<string, () => void>();
 
 function watchRoom(roomId: string): void {
   if (watchedRooms.has(roomId)) return;
   watchedRooms.add(roomId);
 
-  const db = getDb();
-  if (!db) return;
+  getDb().then((db) => {
+    if (!db) return;
 
-  // Watch seat + audience counts for this room
-  let seatCount = 0;
-  let audienceCount = 0;
+    let seatCount = 0;
+    let audCount = 0;
 
-  function onCountChange() {
-    const total = seatCount + audienceCount;
-    if (total === 0) {
-      scheduleRoomCleanup(roomId);
-    } else {
-      // Someone is in the room — cancel any pending cleanup
-      const pending = pendingCleanups.get(roomId);
-      if (pending) {
-        clearTimeout(pending);
-        pendingCleanups.delete(roomId);
-        logger.info({ roomId }, "Room cleanup cancelled — user rejoined");
+    const onCountChange = () => {
+      const total = seatCount + audCount;
+      if (total === 0) {
+        scheduleCleanup(roomId);
+      } else {
+        // Someone is present — cancel any pending cleanup
+        const t = pendingCleanups.get(roomId);
+        if (t) {
+          clearTimeout(t);
+          pendingCleanups.delete(roomId);
+          logger.info({ roomId }, "Pending cleanup cancelled — room has members");
+        }
       }
-    }
-  }
+    };
 
-  const seatsRef = db.ref(`rooms/${roomId}/seats`);
-  const audRef = db.ref(`rooms/${roomId}/audience`);
+    const seatsRef = db.ref(`rooms/${roomId}/seats`);
+    const audRef   = db.ref(`rooms/${roomId}/audience`);
 
-  seatsRef.on("value", (snap: AdminSnap) => {
-    let count = 0;
-    snap.forEach(() => { count++; });
-    seatCount = count;
-    onCountChange();
-  });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const seatsHandler = (snap: any) => {
+      let n = 0;
+      snap.forEach(() => n++);
+      seatCount = n;
+      onCountChange();
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const audHandler = (snap: any) => {
+      let n = 0;
+      snap.forEach(() => n++);
+      audCount = n;
+      onCountChange();
+    };
 
-  audRef.on("value", (snap: AdminSnap) => {
-    let count = 0;
-    snap.forEach(() => { count++; });
-    audienceCount = count;
-    onCountChange();
-  });
+    seatsRef.on("value", seatsHandler);
+    audRef.on("value", audHandler);
 
-  roomListeners.set(roomId, () => {
-    seatsRef.off();
-    audRef.off();
-    watchedRooms.delete(roomId);
-    roomListeners.delete(roomId);
-    const pending = pendingCleanups.get(roomId);
-    if (pending) { clearTimeout(pending); pendingCleanups.delete(roomId); }
+    roomUnsubFns.set(roomId, () => {
+      seatsRef.off("value", seatsHandler);
+      audRef.off("value", audHandler);
+      watchedRooms.delete(roomId);
+      roomUnsubFns.delete(roomId);
+      const t = pendingCleanups.get(roomId);
+      if (t) { clearTimeout(t); pendingCleanups.delete(roomId); }
+    });
   });
 }
 
 function unwatchRoom(roomId: string): void {
-  const unsub = roomListeners.get(roomId);
-  if (unsub) unsub();
+  roomUnsubFns.get(roomId)?.();
 }
 
-// ─── Main Watcher (Active Rooms) ──────────────────────────────────────────────
+// ─── Top-level active-rooms watcher ───────────────────────────────────────────
 
-let _activeRoomsUnsubscribed = false;
+let _stopped = false;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _activeRoomsHandler: ((snap: any) => void) | null = null;
 
-export function startRoomCleanupJob(): void {
-  const db = getDb();
-  if (!db) return;
+export async function startRoomCleanupJob(): Promise<void> {
+  const db = await getDb();
+  if (!db) return; // env vars absent — graceful no-op
 
-  logger.info("Room cleanup job starting — watching active rooms");
+  logger.info("Room cleanup job starting");
+  _stopped = false;
 
   const activeRoomsRef = db.ref("rooms");
 
-  activeRoomsRef.on("value", (snap: AdminSnap) => {
-    if (_activeRoomsUnsubscribed) return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  _activeRoomsHandler = (snap: any) => {
+    if (_stopped) return;
 
-    const currentRoomIds = new Set<string>();
+    const liveRoomIds = new Set<string>();
 
-    snap.forEach((roomSnap: AdminSnap) => {
-      const roomId = roomSnap.key;
+    snap.forEach((roomSnap: any) => {
+      const roomId: string = roomSnap.key;
       if (!roomId) return;
 
-      // Check if this is an active room
-      let isActive = false;
-      roomSnap.forEach((section: AdminSnap) => {
-        if (section.key === "info") {
-          const info = section.val() as Record<string, unknown> | null;
-          if (info && info.active === true) isActive = true;
-        }
-      });
-
-      if (isActive) {
-        currentRoomIds.add(roomId);
+      // Read info child to check active flag
+      const infoSnap = roomSnap.child("info");
+      const info = infoSnap.val() as Record<string, unknown> | null;
+      if (info?.["active"] === true) {
+        liveRoomIds.add(roomId);
         watchRoom(roomId);
       }
     });
 
-    // Unwatch rooms that are no longer active
+    // Stop watching rooms that are no longer active
     for (const roomId of watchedRooms) {
-      if (!currentRoomIds.has(roomId)) {
+      if (!liveRoomIds.has(roomId)) {
         unwatchRoom(roomId);
       }
     }
-  });
+  };
+
+  activeRoomsRef.on("value", _activeRoomsHandler);
 }
 
 export function stopRoomCleanupJob(): void {
-  _activeRoomsUnsubscribed = true;
-  const db = getDb();
-  if (db) db.ref("rooms").off();
-  for (const [, timer] of pendingCleanups) clearTimeout(timer);
+  _stopped = true;
+  getDb().then((db) => {
+    if (db && _activeRoomsHandler) {
+      db.ref("rooms").off("value", _activeRoomsHandler);
+    }
+  });
+  for (const [, t] of pendingCleanups) clearTimeout(t);
   pendingCleanups.clear();
-  for (const [, unsub] of roomListeners) unsub();
-  roomListeners.clear();
+  for (const [, unsub] of roomUnsubFns) unsub();
+  roomUnsubFns.clear();
   watchedRooms.clear();
 }
