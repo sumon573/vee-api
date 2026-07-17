@@ -1,0 +1,28 @@
+# Render deployment configuration for Vee API Server
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: vee-api
+    runtime: node
+    region: singapore          # closest to Firebase asia-southeast1 RTDB
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        fromService:
+          type: web
+          name: vee-api
+          property: port
+      # Set these in the Render dashboard → Environment tab:
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false            # secret — enter manually in Render dashboard
+      - key: FIREBASE_DATABASE_URL
+        value: https://vee-chat-36720-default-rtdb.asia-southeast1.firebasedatabase.app
+      # Pre-existing secrets already configured on Render (no change needed):
+      # ONESIGNAL_APP_ID, ONESIGNAL_REST_API_KEY
+      # CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET
