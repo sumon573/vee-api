@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "quurE0e48LgQLRwV9tVyp"
+uri = "file://vee-production-updated.zip"
+type = "unspecified"
+title = "vee-production-updated.zip — Final Production Ready"
