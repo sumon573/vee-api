@@ -47,32 +47,34 @@ async function _init(): Promise<void> {
     process.env["FIREBASE_DATABASE_URL"] ??
     "https://vee-chat-36720-default-rtdb.asia-southeast1.firebasedatabase.app";
 
-  // Dynamic ESM import — firebase-admin is externalised (not bundled by esbuild).
-  // firebase-admin v14 CJS-to-ESM: named exports (.credential, .initializeApp,
-  // .database, .auth, .apps) live on the module NAMESPACE object, not on .default.
-  // Resolution: use namespace if it has .credential; fall back to .default only
-  // for older shims that reverse this convention.
+  // firebase-admin v14 uses the modular subpath API — the legacy namespace
+  // import (import("firebase-admin")) no longer exposes .credential /
+  // .initializeApp / .database / .auth at the top level.
+  // Use the correct subpath entry-points instead.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const adminPkg = (await import("firebase-admin")) as any;
+  const appPkg  = (await import("firebase-admin/app")) as any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const admin = (adminPkg.credential ? adminPkg : (adminPkg.default ?? adminPkg)) as any;
+  const dbPkg   = (await import("firebase-admin/database")) as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const authPkg = (await import("firebase-admin/auth")) as any;
 
-  let app: unknown;
-  const existingApps: unknown[] = admin.apps ?? adminPkg.default?.apps ?? [];
-  if (existingApps.length > 0) {
-    // Already initialised — reuse the instance.
-    app = existingApps[0];
-    logger.info("Firebase Admin: reusing existing app instance");
-  } else {
-    app = admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-      databaseURL,
-    });
-    logger.info({ databaseURL }, "Firebase Admin: initialised");
-  }
+  const initializeApp = appPkg.initializeApp;
+  const getApps       = appPkg.getApps;
+  const cert          = appPkg.cert;
+  const getDatabase   = dbPkg.getDatabase;
+  const getAuth       = authPkg.getAuth;
 
-  _db = admin.database(app);
-  _auth = admin.auth(app);
+  const existing = getApps();
+  const app = existing.length > 0
+    ? existing[0]
+    : initializeApp({
+        credential: cert(serviceAccount),
+        databaseURL,
+      });
+
+  _db   = getDatabase(app);
+  _auth = getAuth(app);
+  logger.info({ databaseURL }, "Firebase Admin: initialised");
 }
 
 function ensureInit(): Promise<void> {
