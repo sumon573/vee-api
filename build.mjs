@@ -24,9 +24,12 @@ async function buildAll() {
     logLevel: "info",
     // firebase-admin and other native / heavy packages are externalised so
     // they're loaded from node_modules at runtime rather than bundled.
+    // "firebase-admin/*" covers the v14 modular subpath imports
+    // (firebase-admin/app, firebase-admin/database, firebase-admin/auth, etc.)
     external: [
       "*.node",
       "firebase-admin",
+      "firebase-admin/*",
       "sharp",
       "better-sqlite3",
       "sqlite3",
