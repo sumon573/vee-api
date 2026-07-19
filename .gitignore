@@ -4,3 +4,7 @@ dist/
 .env.local
 *.log
 .DS_Store
+# Lock file is generated inside Replit with internal proxy URLs
+# (package-firewall.replit.local) that are unreachable on Render.
+# Render generates its own fresh lock during npm install.
+package-lock.json
