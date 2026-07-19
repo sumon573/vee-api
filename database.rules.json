@@ -1,0 +1,481 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    // ─────────────────────────────────────────────────────────────────────
+    // users — profile data, readable by any authenticated user so searches
+    // and profile screens work; individual $uid nodes are only writable by
+    // the owner, with sensitive admin-only sub-paths further restricted.
+    // ─────────────────────────────────────────────────────────────────────
+    "users": {
+      ".read": "auth != null",
+      ".indexOn": ["vId", "online"],
+      "$uid": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid === $uid",
+        "vId": {
+          ".validate": "!data.exists() || data.val() === newData.val()"
+        },
+        "createdAt": {
+          ".validate": "!data.exists() || data.val() === newData.val()"
+        },
+        "banned": {
+          ".write": "auth.token.role === 'superAdmin' || auth.token.role === 'admin'"
+        },
+        "banReason": {
+          ".write": "auth.token.role === 'superAdmin' || auth.token.role === 'admin'"
+        },
+        "bannedAt": {
+          ".write": "auth.token.role === 'superAdmin' || auth.token.role === 'admin'"
+        },
+        "bannedBy": {
+          ".write": "auth.token.role === 'superAdmin' || auth.token.role === 'admin'"
+        },
+        "diamonds": {
+          ".write": "auth.token.role === 'superAdmin' || auth.token.role === 'admin'",
+          ".validate": "newData.isNumber() && newData.val() >= 0"
+        },
+        "role": {
+          ".write": "auth.token.role === 'superAdmin'"
+        },
+        "privacy": {
+          ".write": "auth != null && auth.uid === $uid"
+        }
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // vids — VId reservation registry; a VId can only be claimed once and
+    // must point to the claiming user's UID.
+    // ─────────────────────────────────────────────────────────────────────
+    "vids": {
+      ".read": "auth != null",
+      "$vId": {
+        ".read": "auth != null",
+        ".write": "auth != null && (!data.exists() || data.val() === auth.uid) && newData.val() === auth.uid"
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Social graph — following / followers / friends / friend requests
+    // ─────────────────────────────────────────────────────────────────────
+    "following": {
+      "$uid": {
+        ".read": "auth != null",
+        "$targetUid": {
+          ".write": "auth != null && auth.uid === $uid",
+          ".validate": "!newData.exists() || newData.val() === true"
+        }
+      }
+    },
+    "followers": {
+      "$uid": {
+        ".read": "auth != null",
+        "$followerUid": {
+          ".write": "auth != null && auth.uid === $followerUid",
+          ".validate": "!newData.exists() || newData.val() === true"
+        }
+      }
+    },
+    "friendRequests": {
+      "$toUid": {
+        ".read": "auth != null && auth.uid === $toUid",
+        "$fromUid": {
+          ".write": "auth != null && (auth.uid === $fromUid || auth.uid === $toUid)",
+          ".validate": "!newData.exists() || (newData.child('fromUid').val() === $fromUid && newData.child('fromUid').val() === auth.uid && newData.child('status').val() === 'pending')"
+        }
+      }
+    },
+    "sentRequests": {
+      "$fromUid": {
+        ".read": "auth != null && auth.uid === $fromUid",
+        "$toUid": {
+          ".write": "auth != null && (auth.uid === $fromUid || auth.uid === $toUid)",
+          ".validate": "!newData.exists() || newData.val() === true"
+        }
+      }
+    },
+    "friends": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        "$friendUid": {
+          ".write": "auth != null && (auth.uid === $uid || auth.uid === $friendUid)",
+          ".validate": "!newData.exists() || newData.val() === true"
+        }
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // userChats — per-user chat list / metadata
+    //
+    // Security fix: replaced the vulnerable $chatId.contains(auth.uid)
+    // check (which allows path injection — any uid "abc" can write to
+    // paths containing "abc" regardless of position) with a length-exact
+    // check. A valid chatId is exactly uid1 + "_" + uid2, so its length
+    // must equal both UIDs combined plus one separator character. Together
+    // with both contains() checks this proves the chatId is exactly the
+    // canonical buildChatId(auth.uid, $uid) — no extra characters allowed.
+    // ─────────────────────────────────────────────────────────────────────
+    "userChats": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        "$chatId": {
+          ".write": "auth != null && (auth.uid === $uid || ($chatId.contains(auth.uid) && $chatId.contains($uid) && $chatId.length === auth.uid.length + $uid.length + 1))",
+          ".validate": "!newData.exists() || newData.child('id').isString()"
+        }
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // chats — message bodies; only participants may read/write.
+    // ─────────────────────────────────────────────────────────────────────
+    "chats": {
+      "$chatId": {
+        ".read": "auth != null && root.child('userChats').child(auth.uid).child($chatId).exists()",
+        "messages": {
+          "$msgId": {
+            ".write": "auth != null && root.child('userChats').child(auth.uid).child($chatId).exists()",
+            ".validate": "data.exists() || newData.child('senderId').val() === auth.uid",
+            // RC8-B1 Security Fix: enforce maximum message content length to prevent
+            // storage abuse via arbitrarily large payloads.
+            "content": {
+              ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 2000)"
+            }
+          }
+        },
+        "typing": {
+          "$uid": {
+            ".write": "auth != null && auth.uid === $uid && root.child('userChats').child(auth.uid).child($chatId).exists()"
+          }
+        }
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // stories — PUBLIC stories only.
+    //
+    // After this change, publishStory() routes contacts-only stories to
+    // the contactStories/ path below (which has friend-gated read rules).
+    // New public stories continue to live here; existing contacts-only
+    // stories already in this path are not affected (grandfathered).
+    // ─────────────────────────────────────────────────────────────────────
+    "stories": {
+      ".read": "auth != null",
+      "$uid": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid === $uid",
+        "$storyId": {
+          "viewCount": {
+            ".write": "auth != null",
+            ".validate": "newData.isNumber() && newData.val() >= 0"
+          },
+          "reactions": {
+            "$reactorUid": {
+              ".write": "auth != null && auth.uid === $reactorUid",
+              ".validate": "!newData.exists() || newData.isString()"
+            }
+          },
+          "comments": {
+            "$commentId": {
+              ".write": "auth != null && (!newData.exists() || newData.child('userId').val() === auth.uid)",
+              ".validate": "!newData.exists() || (newData.child('userId').isString() && newData.child('userName').isString() && newData.child('text').isString() && newData.child('text').val().length <= 500 && newData.child('ts').isNumber())"
+            }
+          }
+        }
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // contactStories — server-side enforced contacts-only stories.
+    //
+    // Only the author and their confirmed mutual friends may read. This is
+    // the secure path for privacy === 'contacts' stories. The friends/
+    // node is used for access control because Firebase RTDB cannot perform
+    // server-side joins; mutual friendship is the only reliable predicate
+    // available without a Cloud Functions intermediary.
+    //
+    // Security guarantee: a non-friend authenticated user CANNOT read
+    // contacts-only stories even by querying the database directly.
+    // ─────────────────────────────────────────────────────────────────────
+    "contactStories": {
+      "$uid": {
+        ".read": "auth != null && (auth.uid === $uid || root.child('friends').child($uid).child(auth.uid).val() === true)",
+        ".write": "auth != null && auth.uid === $uid",
+        "$storyId": {
+          "viewCount": {
+            ".write": "auth != null && (auth.uid === $uid || root.child('friends').child($uid).child(auth.uid).val() === true)",
+            ".validate": "newData.isNumber() && newData.val() >= 0"
+          },
+          "reactions": {
+            "$reactorUid": {
+              ".write": "auth != null && auth.uid === $reactorUid && (auth.uid === $uid || root.child('friends').child($uid).child(auth.uid).val() === true)",
+              ".validate": "!newData.exists() || newData.isString()"
+            }
+          },
+          "comments": {
+            "$commentId": {
+              ".write": "auth != null && (auth.uid === $uid || root.child('friends').child($uid).child(auth.uid).val() === true) && (!newData.exists() || newData.child('userId').val() === auth.uid)",
+              ".validate": "!newData.exists() || (newData.child('userId').isString() && newData.child('userName').isString() && newData.child('text').isString() && newData.child('text').val().length <= 500 && newData.child('ts').isNumber())"
+            }
+          }
+        }
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // publicStoryIndex — lightweight flag indicating which users currently
+    // have at least one active public story. Used by subscribePlanetStories
+    // to avoid subscribing to the entire stories/ subtree.
+    // ─────────────────────────────────────────────────────────────────────
+    "publicStoryIndex": {
+      ".read": "auth != null",
+      "$uid": {
+        ".write": "auth != null && auth.uid === $uid",
+        ".validate": "!newData.exists() || newData.val() === true"
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // storySeen — tracks which story authors the viewer has seen.
+    // ─────────────────────────────────────────────────────────────────────
+    "storySeen": {
+      "$viewerUid": {
+        ".read": "auth != null && auth.uid === $viewerUid",
+        "$authorUid": {
+          ".write": "auth != null && auth.uid === $viewerUid",
+          ".validate": "!newData.exists() || newData.isNumber()"
+        }
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // calls — 1-to-1 audio call signaling channel.
+    //
+    // DB structure: calls/{calleeUid} → IncomingCall
+    //
+    // Write access:
+    //   CREATE  — only the caller may create; newData.callerId must equal auth.uid
+    //   DELETE  — the callee (accept / decline) OR the original caller
+    //             (cancel / timeout) may remove the node
+    //
+    // Read access:
+    //   Only the callee (auth.uid === $calleeUid) may subscribe to their
+    //   own incoming-call slot. Callers do not need to read back the signal.
+    //
+    // Validate:
+    //   Required fields: callerId (string), callerName (string),
+    //   roomId (string), createdAt (number).  callerPhotoURL is optional.
+    // ─────────────────────────────────────────────────────────────────────
+    "calls": {
+      "$calleeUid": {
+        ".read": "auth != null && auth.uid === $calleeUid",
+        ".write": "auth != null && ((newData.exists() && newData.child('callerId').val() === auth.uid) || (!newData.exists() && (auth.uid === $calleeUid || (data.exists() && data.child('callerId').val() === auth.uid))))",
+        ".validate": "!newData.exists() || (newData.child('callerId').isString() && newData.child('callerName').isString() && newData.child('roomId').isString() && newData.child('createdAt').isNumber() && newData.child('callerId').val() === auth.uid)"
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // rooms — voice rooms; all active rooms are publicly readable by
+    // authenticated users so the room list and join flows work.
+    //
+    // Count/statistics security:
+    //   memberCount, listenerCount, memberPreviews, and isTrending are
+    //   written by _updateCounts() which is called internally by seat and
+    //   audience operations. Instead of allowing any authenticated user to
+    //   write these (the old rule), only the room owner, current audience
+    //   members, or admins may update them. This prevents external users
+    //   from inflating counts to manipulate trending.
+    //
+    //   Known limitation: when a seat holder (who is not in audience and
+    //   not the owner) triggers _updateCounts, the write is silently
+    //   rejected. The owner's next action will correct the count. This is
+    //   a Phase 1 trade-off; a Cloud Functions trigger is the correct
+    //   long-term solution.
+    // ─────────────────────────────────────────────────────────────────────
+    "rooms": {
+      ".read": "auth != null",
+      ".indexOn": ["info/active", "info/ownerId"],
+      "$roomId": {
+        ".read": "auth != null",
+        "info": {
+          ".write": "auth != null && (!data.exists() || data.child('ownerId').val() === auth.uid || auth.token.role === 'superAdmin' || auth.token.role === 'admin' || auth.token.role === 'moderator')",
+          "memberCount": {
+            ".write": "auth != null && (root.child('rooms').child($roomId).child('info').child('ownerId').val() === auth.uid || root.child('rooms').child($roomId).child('audience').child(auth.uid).exists() || auth.token.role === 'superAdmin' || auth.token.role === 'admin')",
+            ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 20"
+          },
+          "listenerCount": {
+            ".write": "auth != null && (root.child('rooms').child($roomId).child('info').child('ownerId').val() === auth.uid || root.child('rooms').child($roomId).child('audience').child(auth.uid).exists() || auth.token.role === 'superAdmin' || auth.token.role === 'admin')",
+            ".validate": "newData.isNumber() && newData.val() >= 0"
+          },
+          "memberPreviews": {
+            ".write": "auth != null && (root.child('rooms').child($roomId).child('info').child('ownerId').val() === auth.uid || root.child('rooms').child($roomId).child('audience').child(auth.uid).exists() || auth.token.role === 'superAdmin' || auth.token.role === 'admin')"
+          },
+          "isTrending": {
+            ".write": "auth != null && (root.child('rooms').child($roomId).child('info').child('ownerId').val() === auth.uid || root.child('rooms').child($roomId).child('audience').child(auth.uid).exists() || auth.token.role === 'superAdmin' || auth.token.role === 'admin')",
+            ".validate": "newData.isBoolean()"
+          }
+        },
+        "seats": {
+          "$seatIndex": {
+            ".write": "auth != null && (!data.exists() || data.child('userId').val() === auth.uid || root.child('rooms').child($roomId).child('info').child('ownerId').val() === auth.uid || auth.token.role === 'superAdmin' || auth.token.role === 'admin' || auth.token.role === 'moderator')"
+          }
+        },
+        "audience": {
+          "$uid": {
+            ".write": "auth != null && (auth.uid === $uid || root.child('rooms').child($roomId).child('info').child('ownerId').val() === auth.uid || auth.token.role === 'superAdmin' || auth.token.role === 'admin' || auth.token.role === 'moderator')"
+          }
+        },
+        "lockedSeats": {
+          ".write": "auth != null && (root.child('rooms').child($roomId).child('info').child('ownerId').val() === auth.uid || auth.token.role === 'superAdmin' || auth.token.role === 'admin' || auth.token.role === 'moderator')"
+        },
+        "counts": {
+          ".write": "auth != null && (root.child('rooms').child($roomId).child('info').child('ownerId').val() === auth.uid || root.child('rooms').child($roomId).child('audience').child(auth.uid).exists() || auth.token.role === 'superAdmin' || auth.token.role === 'admin')"
+        },
+        "chat": {
+          "$msgId": {
+            ".write": "auth != null",
+            ".validate": "!newData.exists() || ((newData.child('senderId').val() === auth.uid || newData.child('senderId').val() === 'system') && newData.child('text').isString() && newData.child('ts').isNumber())"
+          }
+        },
+        "reactions": {
+          "$reactionId": {
+            ".write": "auth != null",
+            ".validate": "!newData.exists() || (newData.child('emoji').isString() && newData.child('byUid').val() === auth.uid && newData.child('byName').isString() && newData.child('ts').isNumber())"
+          }
+        }
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // roomBlocks / roomSeatRequests / roomInvites / seatInvites
+    // ─────────────────────────────────────────────────────────────────────
+    "roomBlocks": {
+      "$roomId": {
+        ".read": "auth != null",
+        "$uid": {
+          ".write": "auth != null && (root.child('rooms').child($roomId).child('info').child('ownerId').val() === auth.uid || auth.token.role === 'superAdmin' || auth.token.role === 'admin' || auth.token.role === 'moderator')"
+        }
+      }
+    },
+    "roomSeatRequests": {
+      "$roomId": {
+        ".read": "auth != null",
+        "$reqId": {
+          ".write": "auth != null",
+          // RC8-B1 Security Fix: userId must match auth.uid on CREATE so that a user
+          // cannot impersonate another user in a seat request. On UPDATE (owner
+          // approving/rejecting), the userId field must remain unchanged from its
+          // original value — only the status may change.
+          ".validate": "!newData.exists() || (newData.child('userId').isString() && newData.child('status').isString() && (newData.child('status').val() === 'pending' || newData.child('status').val() === 'approved' || newData.child('status').val() === 'rejected') && newData.child('ts').isNumber() && (!data.exists() ? newData.child('userId').val() === auth.uid : newData.child('userId').val() === data.child('userId').val()))"
+        }
+      }
+    },
+    "roomInvites": {
+      "$inviteeUid": {
+        ".read": "auth != null && auth.uid === $inviteeUid",
+        "$roomId": {
+          ".write": "auth != null && (!newData.exists() || newData.child('inviterUid').val() === auth.uid || auth.uid === $inviteeUid)",
+          ".validate": "!newData.exists() || (newData.child('roomId').isString() && newData.child('inviterUid').val() === auth.uid && newData.child('ts').isNumber())"
+        }
+      }
+    },
+    "seatInvites": {
+      "$inviteeUid": {
+        ".read": "auth != null && auth.uid === $inviteeUid",
+        "$inviteId": {
+          ".write": "auth != null && (auth.uid === $inviteeUid || (newData.exists() && newData.child('inviterUid').val() === auth.uid) || auth.token.role === 'superAdmin' || auth.token.role === 'admin' || auth.token.role === 'moderator')",
+          ".validate": "!newData.exists() || (newData.child('roomId').isString() && newData.child('inviterUid').val() === auth.uid && newData.child('seatIdx').isNumber() && newData.child('ts').isNumber())"
+        }
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // wallets — all financial writes are server-only (write: false).
+    // ─────────────────────────────────────────────────────────────────────
+    "wallets": {
+      "$uid": {
+        ".read": "auth != null && (auth.uid === $uid || auth.token.role === 'superAdmin' || auth.token.role === 'admin')",
+        "balance": {
+          ".write": false
+        },
+        "weeklyEarned": {
+          ".write": false
+        },
+        "weekStart": {
+          ".write": false
+        },
+        "transactions": {
+          ".write": false
+        }
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // userRooms — persistent "My Room" index per user.
+    // ─────────────────────────────────────────────────────────────────────
+    "userRooms": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        // RC8-B2: index on joinedAt so subscribeMyRoomsCombined can use
+        // orderByChild('joinedAt') + limitToLast(20) efficiently.
+        ".indexOn": ["joinedAt"],
+        "$roomId": {
+          ".write": "auth != null && auth.uid === $uid",
+          ".validate": "!newData.exists() || newData.child('joinedAt').isNumber()"
+        }
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // userBlocks — global user block list.
+    // ─────────────────────────────────────────────────────────────────────
+    "userBlocks": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        "$targetUid": {
+          ".write": "auth != null && auth.uid === $uid",
+          ".validate": "!newData.exists() || (newData.child('targetUid').isString() && newData.child('targetName').isString() && newData.child('blockedAt').isNumber())"
+        }
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // reports / moderation
+    // ─────────────────────────────────────────────────────────────────────
+    "reports": {
+      ".read": "auth != null && (auth.token.role === 'superAdmin' || auth.token.role === 'admin' || auth.token.role === 'moderator')",
+      "$reportId": {
+        ".write": "auth != null",
+        ".validate": "!newData.exists() || (newData.child('reporterUid').val() === auth.uid && newData.child('reportedUid').isString() && newData.child('reason').isString() && newData.child('ts').isNumber())"
+      }
+    },
+    "moderationLog": {
+      ".read": "auth != null && (auth.token.role === 'superAdmin' || auth.token.role === 'admin')",
+      ".write": "auth != null && (auth.token.role === 'superAdmin' || auth.token.role === 'admin')",
+      "$logId": {
+        ".validate": "newData.hasChildren(['moderatorUid','moderatorName','action','targetUid','targetName','timestamp'])"
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // leaderboard — read-only for clients; populated by server-side jobs.
+    // ─────────────────────────────────────────────────────────────────────
+    "leaderboard": {
+      ".read": "auth != null",
+      ".write": false,
+      ".indexOn": ["weeklyEarned"]
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // roomPins — hashed PINs for private rooms.
+    // ─────────────────────────────────────────────────────────────────────
+    "roomPins": {
+      "$roomId": {
+        ".read": "auth != null",
+        ".write": "auth != null && (root.child(\"rooms\").child($roomId).child(\"info\").child(\"ownerId\").val() === auth.uid || auth.token.role === \"superAdmin\" || auth.token.role === \"admin\")",
+        ".validate": "!newData.exists() || (newData.child(\"hashedPin\").isString() && newData.child(\"updatedAt\").isNumber())"
+      }
+    }
+  }
+}

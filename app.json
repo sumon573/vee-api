@@ -1,0 +1,123 @@
+{
+  "expo": {
+    "name": "Vee",
+    "slug": "vee",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "updates": {
+      "enabled": false,
+      "fallbackToCacheTimeout": 0,
+      "checkAutomatically": "ON_ERROR_RECOVERY"
+    },
+    "icon": "./assets/images/icon.png",
+    "scheme": "vee",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": false,
+    "splash": {
+      "image": "./assets/images/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#07020F"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.vee.app",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Vee uses the microphone so you can speak in Voice Rooms.",
+        "NSCameraUsageDescription": "Vee uses the camera to capture profile photos and stories.",
+        "NSPhotoLibraryUsageDescription": "Vee accesses your photo library to upload profile photos and stories.",
+        "NSPhotoLibraryAddUsageDescription": "Vee saves media to your photo library."
+      },
+      "buildNumber": "1"
+    },
+    "android": {
+      "backgroundColor": "#07020F",
+      "package": "com.vee.app",
+      "minSdkVersion": 24,
+      "targetSdkVersion": 35,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#07020F"
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.VIBRATE",
+        "android.permission.POST_NOTIFICATIONS"
+      ],
+      "versionCode": 1,
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "https",
+              "host": "vee.app"
+            },
+            {
+              "scheme": "vee"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
+        }
+      ],
+      "googleServicesFile": "./google-services.json"
+    },
+    "web": {
+      "favicon": "./assets/images/icon.png"
+    },
+    "plugins": [
+      [
+        "expo-router",
+        {
+          "origin": "https://vee.app"
+        }
+      ],
+      "expo-font",
+      "expo-web-browser",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Vee accesses your photo library to upload profile photos and stories.",
+          "cameraPermission": "Vee uses the camera to capture profile photos and stories.",
+          "microphonePermission": "Vee uses the microphone to record voice stories."
+        }
+      ],
+      [
+        "onesignal-expo-plugin",
+        {
+          "mode": "production",
+          "smallIcons": [
+            "./assets/images/icon.png"
+          ]
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": false
+    },
+    "extra": {
+      "router": {
+        "origin": "https://vee.app"
+      },
+      "eas": {
+        "projectId": "fa1c0d17-83e6-457c-943a-4420f2cc8eaa"
+      }
+    },
+    "owner": "hihiv56876s-team"
+  }
+}
