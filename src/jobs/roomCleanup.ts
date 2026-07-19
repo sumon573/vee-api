@@ -37,75 +37,23 @@
  */
 
 import { logger } from "../lib/logger.js";
+import { getAdminDb } from "../lib/firebase-admin.js";
 
-// ─── Constants ─────────────────────────────────────────────────────────────────
+// ─── Constants ─────────────────────────────────────────────────────────
 
 const GRACE_PERIOD_MS = 45_000; // 45 s — must be 30–60 s per spec
 
-/**
- * Hardcoded fallback so the job works even if FIREBASE_DATABASE_URL is not
- * explicitly set on the host (the URL is public, non-sensitive info).
- */
-const FALLBACK_DATABASE_URL =
-  "https://vee-chat-36720-default-rtdb.asia-southeast1.firebasedatabase.app";
+// ─── Firebase Admin — shared singleton ──────────────────────────────────────
 
-// ─── Firebase Admin — lazy ESM initialisation ──────────────────────────────────
-
-// We use a top-level `let` + lazy init so:
-//   a) The server starts without crashing when env vars are absent (dev/test).
-//   b) ESM dynamic import() is used — compatible with `"type": "module"` and
-//      with the esbuild bundle that externalises firebase-admin.
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let adminDb: any = null;
-let adminInitAttempted = false;
+// Delegate to the shared firebase-admin singleton (lib/firebase-admin.ts).
+// Root cause: the local init read .apps.length without a null-guard.
+// firebase-admin v14 ESM does not always expose .apps on the resolved
+// module object, so accessing .length threw TypeError: Cannot read
+// properties of undefined (reading 'length').
+// The shared singleton guards correctly with (admin.apps && admin.apps.length).
 
 async function getDb() {
-  if (adminDb) return adminDb;
-  if (adminInitAttempted) return null; // already failed — don't retry
-  adminInitAttempted = true;
-
-  const serviceAccountRaw = process.env["FIREBASE_SERVICE_ACCOUNT"];
-  const databaseURL =
-    process.env["FIREBASE_DATABASE_URL"] ?? FALLBACK_DATABASE_URL;
-
-  if (!serviceAccountRaw) {
-    logger.warn(
-      "FIREBASE_SERVICE_ACCOUNT env var not set — room cleanup job disabled",
-    );
-    return null;
-  }
-
-  try {
-    const serviceAccount = JSON.parse(serviceAccountRaw);
-    // Dynamic ESM import — firebase-admin is externalised by esbuild so Node
-    // resolves it from node_modules at runtime.
-    // firebase-admin is externalised by esbuild — resolved from node_modules
-    // at runtime. Cast to `any` because the ESM dynamic-import type wrapper
-    // differs from the CJS type declarations; runtime shape is identical.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const adminPkg = (await import("firebase-admin")) as any;
-    // firebase-admin v14 ships both a default export and named re-exports;
-    // prefer `.default` (ESM), fall back to the module itself (CJS compat).
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const adminModule = (adminPkg.default ?? adminPkg) as any;
-
-    if (!adminModule.apps.length) {
-      adminModule.initializeApp({
-        credential: adminModule.credential.cert(serviceAccount),
-        databaseURL,
-      });
-    }
-    adminDb = adminModule.database();
-    logger.info({ databaseURL }, "Firebase Admin initialised for room cleanup");
-    return adminDb;
-  } catch (err) {
-    logger.error(
-      { err },
-      "Failed to initialise Firebase Admin — room cleanup disabled",
-    );
-    return null;
-  }
+  return getAdminDb();
 }
 
 // ─── Grace-period tracker ──────────────────────────────────────────────────────
