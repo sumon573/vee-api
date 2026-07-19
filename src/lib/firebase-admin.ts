@@ -48,18 +48,20 @@ async function _init(): Promise<void> {
     "https://vee-chat-36720-default-rtdb.asia-southeast1.firebasedatabase.app";
 
   // Dynamic ESM import — firebase-admin is externalised (not bundled by esbuild).
-  // firebase-admin v14 ships both a default export (ESM) and named re-exports
-  // (CJS compat); prefer `.default`, fall back to the module object itself —
-  // same pattern used by roomCleanup.ts for consistent behaviour.
+  // firebase-admin v14 CJS-to-ESM: named exports (.credential, .initializeApp,
+  // .database, .auth, .apps) live on the module NAMESPACE object, not on .default.
+  // Resolution: use namespace if it has .credential; fall back to .default only
+  // for older shims that reverse this convention.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const adminPkg = (await import("firebase-admin")) as any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const admin = (adminPkg.default ?? adminPkg) as any;
+  const admin = (adminPkg.credential ? adminPkg : (adminPkg.default ?? adminPkg)) as any;
 
   let app: unknown;
-  if (admin.apps && admin.apps.length > 0) {
-    // Already initialised (e.g. by the room-cleanup job) — reuse the instance.
-    app = admin.apps[0];
+  const existingApps: unknown[] = admin.apps ?? adminPkg.default?.apps ?? [];
+  if (existingApps.length > 0) {
+    // Already initialised — reuse the instance.
+    app = existingApps[0];
     logger.info("Firebase Admin: reusing existing app instance");
   } else {
     app = admin.initializeApp({
